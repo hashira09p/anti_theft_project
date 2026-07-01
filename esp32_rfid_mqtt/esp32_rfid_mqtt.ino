@@ -49,14 +49,6 @@ const char* TOPIC_SCAN    = "home/rfid/scan";       // publish scans here
 const char* TOPIC_ACCESS  = "home/rfid/access";     // subscribe for access decisions
 const char* TOPIC_STATUS  = "home/rfid/status";     // device heartbeat
 
-// ── Authorized card UIDs ──────────────────────────────────────
-// Add your registered card UIDs here (format: "AA BB CC DD")
-const char* AUTHORIZED_CARDS[] = {
-  "39 34 49 12",   // Owner card
-  "E5 F6 07 18",   // Family member
-};
-const int AUTHORIZED_COUNT = 2;
-
 // ── Location identifier ───────────────────────────────────────
 const char* LOCATION = "front_door";   // change per device
 
@@ -171,11 +163,24 @@ String getCardUID() {
 
 // Check if UID is in the authorized list
 bool checkAuthorized(String uid) {
-  for (int i = 0; i < AUTHORIZED_COUNT; i++) {
-    if (uid == String(AUTHORIZED_CARDS[i])) {
-      return true;
-    }
+  StaticJsonDocument<256> doc;
+  doc["card_uid"]    = uid;
+  doc["card_uid"]    = uid;
+  doc["authorized"]  = authorized;
+  doc["location"]    = LOCATION;
+  doc["timestamp"]   = millis();   // use NTP time in production
+  doc["device_id"]   = MQTT_CLIENT_ID;
+
+  char payload[256];
+  serializeJson(doc, payload);
+
+  if (mqtt.publish(TOPIC_SCAN, payload, true)) {
+    Serial.print("[MQTT] Published scan: ");
+    Serial.println(payload);
+  } else {
+    Serial.println("[MQTT] Publish failed!");
   }
+
   return false;
 }
 

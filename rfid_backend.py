@@ -77,7 +77,7 @@ def save_scan_to_db(scan_data: dict, anomaly_score: float, is_anomaly: bool):
         "is_anomaly":    is_anomaly,
     }
     try:
-        result = supabase.table("rfid_scans").insert(row).execute()
+        result = supabase.table("ci_train").insert(row).execute()
         print(f"[DB] Saved: {scan_data['card_uid']} | score={anomaly_score:.3f} | anomaly={is_anomaly}")
         return result
     except Exception as e:
@@ -86,7 +86,7 @@ def save_scan_to_db(scan_data: dict, anomaly_score: float, is_anomaly: bool):
 
 def fetch_scan_history(limit: int = 500) -> list:
     try:
-        result = supabase.table("rfid_scans").select(
+        result = supabase.table("ci_train").select(
             "hour_of_day, day_of_week, authorized, anomaly_score"
         ).order("scanned_at", desc=True).limit(limit).execute()
         return result.data
@@ -98,7 +98,7 @@ def fetch_scan_history(limit: int = 500) -> list:
 def get_recent_scans(card_uid: str, hours: int = 24) -> list:
     try:
         since = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
-        result = supabase.table("rfid_scans") \
+        result = supabase.table("ci_train") \
             .select("id") \
             .eq("card_uid", card_uid) \
             .gte("scanned_at", since) \
@@ -108,9 +108,7 @@ def get_recent_scans(card_uid: str, hours: int = 24) -> list:
         print(f"[DB ERROR] Failed to get recent scans: {e}")
         return []
 
-# =============================================================
 #  ISOLATION FOREST MODEL
-# =============================================================
 
 def train_model():
     global model, scaler, is_model_trained
@@ -160,10 +158,6 @@ def score_scan(scan_data: dict) -> float:
     raw_score = model.score_samples(features_scaled)[0]
     return round(max(0.0, min(1.0, 0.5 - raw_score)), 4)
 
-# =============================================================
-#  GROQ AI EXPLANATION
-# =============================================================
-
 def ask_ai_about_anomaly(scan_data: dict, anomaly_score: float) -> str:
     now = datetime.utcnow()
     try:
@@ -190,9 +184,6 @@ def ask_ai_about_anomaly(scan_data: dict, anomaly_score: float) -> str:
         print(f"[AI ERROR] {e}")
         return f"Suspicious scan at {now.strftime('%I:%M %p')}. Score: {anomaly_score:.2f}/1.0. Please verify."
 
-# =============================================================
-#  TELEGRAM ALERT
-# =============================================================
 
 def send_telegram_alert(scan_data: dict, anomaly_score: float, explanation: str):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -225,12 +216,17 @@ def send_telegram_alert(scan_data: dict, anomaly_score: float, explanation: str)
 #  MQTT CALLBACKS — paho-mqtt v2 (5 args)
 # =============================================================
 
+def check_card(payload: dict):
+    result = supabase.table("ci_authorized_cards").select("*").eq("card_uid", payload["card_uid"]).execute()
+    return result.data[0]['is_active'] if result.data else False
+
 def on_connect(client, userdata, flags, reason_code, properties):
     print(f"[MQTT] Connect result: {reason_code}")
     if reason_code == 0:
         print("[MQTT] Connected to broker ✓")
-        client.subscribe(TOPIC_SCAN)
-        print(f"[MQTT] Subscribed to: {TOPIC_SCAN}")
+        # Subscribe to everything to confirm messages arrive
+        client.subscribe("#")
+        print("[MQTT] Subscribed to ALL topics (#)")
     else:
         print(f"[MQTT] Connection failed: {reason_code}")
 
@@ -240,18 +236,26 @@ def on_disconnect(client, userdata, flags, reason_code, properties):
 
 
 def on_message(client, userdata, msg):
-    print(f"\n[DEBUG] Message on topic: {msg.topic}")
-    print(f"[DEBUG] Raw payload: {msg.payload}")
+    # print(f"\n[DEBUG] Message on topic: {msg.topic}")
+    # print(f"[DEBUG] Raw payload: {msg.payload}")
     try:
         payload      = json.loads(msg.payload.decode())
         card_uid     = payload.get("card_uid", "UNKNOWN")
-        print(f"[SCAN] Card: {card_uid}")
-
+        # print(f"[SCAN] Card: {card_uid}")
+        
+        is_authorized = check_card(payload)
+        
         anomaly_score = score_scan(payload)
         is_anomaly    = anomaly_score >= ANOMALY_THRESHOLD
-        print(f"[SCORE] {card_uid} → score={anomaly_score:.3f} | anomaly={is_anomaly}")
+        # print(f"[SCORE] {card_uid} → score={anomaly_score:.3f} | anomaly={is_anomaly}")
 
-        save_scan_to_db(payload, anomaly_score, is_anomaly)
+        print('AUTHORIZED:', is_authorized)
+
+        if is_authorized:
+            print('pede pumasok')
+            save_scan_to_db(payload, anomaly_score, is_anomaly)
+        else:
+            print('not authorized')
 
         if is_anomaly:
             print("[ALERT] Anomaly detected! Asking AI...")
@@ -280,7 +284,7 @@ def main():
 
     client = mqtt.Client(
         callback_api_version=CallbackAPIVersion.VERSION2,
-        client_id="python-rfid-backend",
+        client_id="python-rfid-backend-v2",  # ← changed ID
         clean_session=True
     )
     client.username_pw_set(MQTT_USER, MQTT_PASSWORD)
@@ -294,8 +298,20 @@ def main():
     print(f"[MQTT] Connecting to {MQTT_BROKER}:{MQTT_PORT}...")
     client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
 
+    # Use loop_start instead of loop_forever
+    client.loop_start()
+
     print("[READY] Listening for RFID scan events...\n")
-    client.loop_forever()
+
+    # Keep the script alive manually
+    import time
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\n[STOP] Shutting down...")
+        client.loop_stop()
+        client.disconnect()
 
 
 if __name__ == "__main__":
