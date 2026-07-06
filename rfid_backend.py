@@ -45,6 +45,7 @@ MQTT_PASSWORD    = os.getenv("MQTT_PASSWORD")
 GROQ_API_KEY     = os.getenv("GROQ_API_KEY")
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+DASHBOARD_URL    = os.getenv("DASHBOARD_URL", "http://localhost:5001/api/scan")
 
 TOPIC_SCAN        = "home/rfid/scan"
 ANOMALY_THRESHOLD = 0.6
@@ -82,6 +83,28 @@ def save_scan_to_db(scan_data: dict, anomaly_score: float, is_anomaly: bool):
         return result
     except Exception as e:
         print(f"[DB ERROR] Failed to save: {e}")
+
+
+def notify_dashboard(scan_data: dict, anomaly_score: float, is_anomaly: bool):
+    payload = {
+        "card_uid": scan_data.get("card_uid", "UNKNOWN"),
+        "authorized": scan_data.get("authorized", False),
+        "location": scan_data.get("location", "unknown"),
+        "scanned_at": datetime.utcnow().isoformat(),
+        "anomaly_score": round(anomaly_score, 4),
+        "is_anomaly": is_anomaly,
+    }
+    try:
+        req = urllib.request.Request(
+            DASHBOARD_URL,
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            print(f"[DASHBOARD] Notified dashboard: {payload['card_uid']}")
+    except Exception as e:
+        print(f"[DASHBOARD ERROR] {e}")
 
 
 def fetch_scan_history(limit: int = 500) -> list:
@@ -256,6 +279,8 @@ def on_message(client, userdata, msg):
             save_scan_to_db(payload, anomaly_score, is_anomaly)
         else:
             print('not authorized')
+
+        notify_dashboard(payload, anomaly_score, is_anomaly)
 
         if is_anomaly:
             print("[ALERT] Anomaly detected! Asking AI...")
